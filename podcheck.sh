@@ -56,11 +56,15 @@ PODMAN_BIN=/usr/bin/podman
 LOG_TAG="${LOG_TAG:-podcheck}"
 
 VERBOSE=0
+DRY_RUN=0
 CMD=scan
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --verbose)
             VERBOSE=1
+            ;;
+        --dry-run)
+            DRY_RUN=1
             ;;
         --install)
             CMD=install
@@ -75,7 +79,7 @@ while [ "$#" -gt 0 ]; do
             CMD=help
             ;;
         *)
-            printf 'Usage: %s [--install|--uninstall|--status|--help] [--verbose]\n' "$0" >&2
+            printf 'Usage: %s [--install|--uninstall|--status|--help] [--verbose] [--dry-run]\n' "$0" >&2
             exit 2
             ;;
     esac
@@ -320,6 +324,7 @@ Actions (default: scan):
   --uninstall   Remove the systemd units, timer and stale lock (root required)
   --status      Show timer/service status, next run and recent logs
   --verbose     Verbose output during a scan
+  --dry-run     Detect and report violations without stopping containers
   --help        Show this help
 
 Scan exit codes:
@@ -360,6 +365,7 @@ fi
 
 debug_msg "Using podman command: ${PODMAN_BIN}"
 debug_msg "Enforcement mode: ${ENFORCEMENT_MODE}"
+[ "$DRY_RUN" -eq 1 ] && debug_msg "Dry-run mode: container stops disabled"
 
 # Enumerate containers; a failure here must not look like an empty scan.
 if ! containers=$("$PODMAN_BIN" ps --format '{{.ID}} {{.Names}}'); then
@@ -406,26 +412,31 @@ while read -r cid cname; do
     log_msg "incident host=${HOST_LABEL} container=${cname} container_id=${cid} violations=[${VIOLATIONS}]"
 
     # Enforcement: evidence was recorded above; never re-collect after stop.
-    if [ "$STOP_REQUESTED" -eq 1 ]; then
+    if [ "$STOP_REQUESTED" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
         if "$PODMAN_BIN" stop -t 2 "$cid" >/dev/null 2>&1; then
             STOP_RESULT="success"
         else
             STOP_RESULT="failed"
             log_msg "Failed to stop container ${cname} (${cid})"
         fi
+    elif [ "$DRY_RUN" -eq 1 ]; then
+        STOP_RESULT="dry-run"
     else
         STOP_RESULT="n/a"
     fi
 
     ACTION="alert"
     [ "$STOP_REQUESTED" -eq 1 ] && ACTION="stop"
+    [ "$DRY_RUN" -eq 1 ] && ACTION="dry-run"
     log_msg "incident_enforcement host=${HOST_LABEL} container=${cname} container_id=${cid} action=${ACTION} result=${STOP_RESULT} violations=[${VIOLATIONS}]"
 
     HOST_ESCAPED=$(printf '%s' "$HOST_LABEL" | html_escape)
     CNAME_ESCAPED=$(printf '%s' "$cname" | html_escape)
     CID_ESCAPED=$(printf '%s' "$cid" | html_escape)
 
-    if [ "$STOP_RESULT" = "success" ]; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+        DISPOSITION="<b>dry-run: container was not stopped</b> — <code>podman stop -t 2</code> was skipped."
+    elif [ "$STOP_RESULT" = "success" ]; then
         DISPOSITION="<b>container shutdown initiated</b> — <code>podman stop -t 2 executed</code>；若未能在 2 秒内正常退出，将被强制终止。"
     else
         DISPOSITION="<b>container shutdown initiated</b> — 已尝试执行 <code>podman stop -t 2</code> 但操作失败，请人工介入检查容器 <code>${CID_ESCAPED}</code>。"
